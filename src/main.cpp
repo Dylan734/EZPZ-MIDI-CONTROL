@@ -8,7 +8,7 @@
 // ESP32-S3 Super Mini
 //
 // Hardware:
-// - 6 x 10k potentiometers
+// - 5 x 10k potentiometers (Pot 6 disabled)
 // - 1 x 2-axis joystick (optional)
 // - 1 x mechanical keyboard switch
 //
@@ -23,10 +23,10 @@
 // ============================================================
 
 // Set to 1 when joystick is physically connected.
-// Set to 0 when using only the six potentiometers
+// Set to 0 when using only the connected potentiometers
 // and mechanical keyboard switch.
 
-#define ENABLE_JOYSTICK 0
+#define ENABLE_JOYSTICK 1
 
 // Joystick pushbutton can be independently enabled.
 // Only applies when ENABLE_JOYSTICK is 1.
@@ -40,6 +40,16 @@
 // MIDI CC assignments
 
 #define MIDI_CC_START 20
+
+// Set to 1 to transmit paired 14-bit CC messages.
+// Set to 0 for standard 7-bit CC messages.
+// 14-bit mode uses CC 20-24 as MSB and CC 52-56 as LSB.
+// Resolume's 14-bit MIDI mapping must be enabled when this is 1.
+#define MIDI_14BIT_MODE 1
+
+// In 14-bit mode, this threshold is equivalent to roughly
+// two steps of the 7-bit MSB value.
+#define MIDI_14BIT_CHANGE_THRESHOLD 256
 
 #define JOYSTICK_CC_X 26
 #define JOYSTICK_CC_Y 27
@@ -70,17 +80,17 @@
 
 // Input sampling interval
 
-#define SAMPLE_INTERVAL_MS 5
+#define SAMPLE_INTERVAL_MS 10
 
 // Exponential moving average filter
 // Lower = smoother
 // Higher = faster response
 
-#define FILTER_ALPHA 0.20f
+#define FILTER_ALPHA 0.12f
 
 // Minimum MIDI value change before transmission
 
-#define MIDI_CHANGE_THRESHOLD 1
+#define MIDI_CHANGE_THRESHOLD 2
 
 
 // ============================================================
@@ -97,17 +107,29 @@
 // Joystick deadzone around calibrated centre
 
 #define JOYSTICK_DEADZONE 60
-
+// Joystick axis inversion
+#define INVERT_JOYSTICK_X 0
+#define INVERT_JOYSTICK_Y 1
 
 // ============================================================
 // 6. GPIO CONFIGURATION
 // ============================================================
 
-// Six potentiometers
+// Five connected potentiometers.
+// Pot 6 (GPIO7 / CC25) is intentionally disabled because it is disconnected.
 
-const uint8_t POT_PINS[6] = {
-    1, 2, 4, 5, 6, //7
+#define POT_COUNT 6
+
+const uint8_t POT_PINS[POT_COUNT] = {
+    1, 2, 4, 5, 6, 7
 };
+
+// Per-pot ADC endpoint calibration. These initial values are placeholders,
+// not measured values. Set each pot's MIN and MAX from its actual ADC readings.
+// MAX should correspond to the desired early endpoint (e.g. 95% travel).
+// Readings below MIN clamp to MIDI 0; readings above MAX clamp to full scale.
+const uint16_t POT_ADC_MIN[POT_COUNT] = {80, 80, 80, 80, 80, 80};
+const uint16_t POT_ADC_MAX[POT_COUNT] = {4050, 4050, 4050, 4050, 4050, 4050};
 
 // Mechanical keyboard switch
 
@@ -148,6 +170,11 @@ struct AnalogInput {
 
     uint8_t lastMidiValue;
 
+    uint16_t lastMidiValue14;
+
+    uint16_t adcMinimum;
+    uint16_t adcMaximum;
+
 };
 
 
@@ -170,9 +197,9 @@ struct MidiButton {
 // 9. GLOBAL VARIABLES
 // ============================================================
 
-// Six potentiometers
+// Five connected potentiometers
 
-AnalogInput pots[6];
+AnalogInput pots[POT_COUNT];
 
 
 // Mechanical switch
@@ -206,6 +233,10 @@ uint32_t lastSampleTime = 0;
 // 10. ANALOG INPUT INITIALIZATION
 // ============================================================
 
+uint8_t adcToMidi(float adcValue);
+uint8_t adcToMidi(float adcValue, uint16_t adcMinimum, uint16_t adcMaximum);
+uint16_t adcToMidi14(float adcValue, uint16_t adcMinimum, uint16_t adcMaximum);
+
 void initializeAnalogInput(AnalogInput &input) {
 
     analogSetPinAttenuation(
@@ -228,9 +259,15 @@ void initializeAnalogInput(AnalogInput &input) {
     input.filteredValue =
         (float)total / samples;
 
-    // Force initial MIDI transmission
+    // Establish the startup position as the MIDI baseline.
+    // This avoids sending an unnecessary CC message at startup.
 
-    input.lastMidiValue = 255;
+    input.lastMidiValue = adcToMidi(
+        input.filteredValue, input.adcMinimum, input.adcMaximum
+    );
+    input.lastMidiValue14 = adcToMidi14(
+        input.filteredValue, input.adcMinimum, input.adcMaximum
+    );
 
 }
 
@@ -255,17 +292,44 @@ void updateFilter(AnalogInput &input) {
 // ============================================================
 
 uint8_t adcToMidi(float adcValue) {
+    adcValue = constrain(adcValue, 0.0f, (float)ADC_MAX_VALUE);
+    return (uint8_t)((adcValue * 127.0f / ADC_MAX_VALUE) + 0.5f);
+}
+
+// Calibrated 7-bit conversion with endpoint saturation.
+uint8_t adcToMidi(
+    float adcValue,
+    uint16_t adcMinimum,
+    uint16_t adcMaximum
+) {
+    if (adcMaximum <= adcMinimum) return 0;
 
     adcValue = constrain(
-        adcValue,
-        0.0f,
-        (float)ADC_MAX_VALUE
+        adcValue, (float)adcMinimum, (float)adcMaximum
     );
 
-    return (uint8_t)(
-        (adcValue * 127.0f / ADC_MAX_VALUE) + 0.5f
+    float normalized =
+        (adcValue - adcMinimum) / (float)(adcMaximum - adcMinimum);
+
+    return (uint8_t)(normalized * 127.0f + 0.5f);
+}
+
+// Calibrated 14-bit conversion using the same endpoint limits.
+uint16_t adcToMidi14(
+    float adcValue,
+    uint16_t adcMinimum,
+    uint16_t adcMaximum
+) {
+    if (adcMaximum <= adcMinimum) return 0;
+
+    adcValue = constrain(
+        adcValue, (float)adcMinimum, (float)adcMaximum
     );
 
+    float normalized =
+        (adcValue - adcMinimum) / (float)(adcMaximum - adcMinimum);
+
+    return (uint16_t)(normalized * 16383.0f + 0.5f);
 }
 
 
@@ -345,11 +409,44 @@ uint8_t joystickToMidi(
 
 void sendControlChange(
     AnalogInput &input,
-    uint8_t midiValue
+    uint8_t midiValue,
+    uint16_t value14
 ) {
 
-    bool firstMessage =
-        input.lastMidiValue == 255;
+#if MIDI_14BIT_MODE
+
+    // value14 has already been scaled using calibrated endpoints.
+
+    bool valueChanged =
+        abs(
+            (int)value14 -
+            (int)input.lastMidiValue14
+        ) >= MIDI_14BIT_CHANGE_THRESHOLD;
+
+    if (valueChanged) {
+
+        uint8_t msb = (uint8_t)(value14 >> 7);
+        uint8_t lsb = (uint8_t)(value14 & 0x7F);
+
+        // 14-bit CC consists of an MSB controller (0-31)
+        // followed by its LSB partner (controller + 32).
+        MIDI.controlChange(
+            input.midiCC,
+            msb,
+            MIDI_CHANNEL
+        );
+
+        MIDI.controlChange(
+            input.midiCC + 32,
+            lsb,
+            MIDI_CHANNEL
+        );
+
+        input.lastMidiValue14 = value14;
+        input.lastMidiValue = midiValue;
+    }
+
+#else
 
     bool valueChanged =
         abs(
@@ -357,8 +454,7 @@ void sendControlChange(
             (int)input.lastMidiValue
         ) >= MIDI_CHANGE_THRESHOLD;
 
-
-    if (firstMessage || valueChanged) {
+    if (valueChanged) {
 
         MIDI.controlChange(
             input.midiCC,
@@ -367,8 +463,9 @@ void sendControlChange(
         );
 
         input.lastMidiValue = midiValue;
-
     }
+
+#endif
 
 }
 
@@ -381,13 +478,15 @@ void processPotentiometer(AnalogInput &input) {
 
     updateFilter(input);
 
-    uint8_t midiValue =
-        adcToMidi(input.filteredValue);
-
-    sendControlChange(
-        input,
-        midiValue
+    uint8_t midiValue = adcToMidi(
+        input.filteredValue, input.adcMinimum, input.adcMaximum
     );
+
+    uint16_t midiValue14 = adcToMidi14(
+        input.filteredValue, input.adcMinimum, input.adcMaximum
+    );
+
+    sendControlChange(input, midiValue, midiValue14);
 
 }
 
@@ -400,22 +499,25 @@ void processPotentiometer(AnalogInput &input) {
 
 void processJoystickAxis(
     AnalogInput &input,
-    float center
+    float center,
+    bool invert
 ) {
-
     updateFilter(input);
 
+    float adcValue = input.filteredValue;
+    float adcCenter = center;
+
+    if (invert) {
+        adcValue = ADC_MAX_VALUE - adcValue;
+        adcCenter = ADC_MAX_VALUE - adcCenter;
+    }
+
     uint8_t midiValue =
-        joystickToMidi(
-            input.filteredValue,
-            center
-        );
+        joystickToMidi(adcValue, adcCenter);
 
-    sendControlChange(
-        input,
-        midiValue
-    );
+    uint16_t midiValue14 = (uint16_t)midiValue * 129U;
 
+    sendControlChange(input, midiValue, midiValue14);
 }
 
 #endif
@@ -538,7 +640,7 @@ void setup() {
 
 
     // --------------------------------------------------------
-    // SIX POTENTIOMETERS
+    // FIVE CONNECTED POTENTIOMETERS
     // --------------------------------------------------------
 
     Serial.println();
@@ -546,21 +648,26 @@ void setup() {
     Serial.println("Initializing potentiometers...");
 
 
-    for (uint8_t i = 0; i < 6; i++) {
+    for (uint8_t i = 0; i < POT_COUNT; i++) {
 
         pots[i].pin = POT_PINS[i];
 
-        pots[i].midiCC =
-            MIDI_CC_START + i;
+        pots[i].midiCC = MIDI_CC_START + i;
+        pots[i].adcMinimum = POT_ADC_MIN[i];
+        pots[i].adcMaximum = POT_ADC_MAX[i];
+
+        if (pots[i].adcMaximum <= pots[i].adcMinimum) {
+            Serial.printf("ERROR: Pot %u has invalid ADC calibration limits\n", i + 1);
+            while (true) delay(1000);
+        }
 
         initializeAnalogInput(pots[i]);
 
 
         Serial.printf(
-            "POT %d | GPIO %d | CC %d\n",
-            i + 1,
-            pots[i].pin,
-            pots[i].midiCC
+            "POT %d | GPIO %d | CC %d | ADC min %u | ADC max %u\n",
+            i + 1, pots[i].pin, pots[i].midiCC,
+            pots[i].adcMinimum, pots[i].adcMaximum
         );
 
     }
@@ -605,11 +712,15 @@ void setup() {
     joystickX.pin = JOYSTICK_X_PIN;
 
     joystickX.midiCC = JOYSTICK_CC_X;
+    joystickX.adcMinimum = 0;
+    joystickX.adcMaximum = ADC_MAX_VALUE;
 
 
     joystickY.pin = JOYSTICK_Y_PIN;
 
     joystickY.midiCC = JOYSTICK_CC_Y;
+    joystickY.adcMinimum = 0;
+    joystickY.adcMaximum = ADC_MAX_VALUE;
 
 
     initializeAnalogInput(joystickX);
@@ -682,6 +793,11 @@ void setup() {
 
     Serial.println("Initializing USB MIDI...");
 
+#if MIDI_14BIT_MODE
+    Serial.println("MIDI format: 14-bit CC (paired controllers)");
+#else
+    Serial.println("MIDI format: 7-bit CC");
+#endif
 
     MIDI.begin();
 
@@ -719,10 +835,10 @@ void loop() {
 
 
         // ----------------------------------------------------
-        // SIX POTENTIOMETERS
+        // FIVE CONNECTED POTENTIOMETERS
         // ----------------------------------------------------
 
-        for (uint8_t i = 0; i < 6; i++) {
+        for (uint8_t i = 0; i < POT_COUNT; i++) {
 
             processPotentiometer(pots[i]);
 
@@ -744,13 +860,14 @@ void loop() {
 
         processJoystickAxis(
             joystickX,
-            joystickCenterX
+            joystickCenterX,
+            INVERT_JOYSTICK_X
         );
-
 
         processJoystickAxis(
             joystickY,
-            joystickCenterY
+            joystickCenterY,
+            INVERT_JOYSTICK_Y
         );
 
 
