@@ -106,7 +106,7 @@
 // Six potentiometers
 
 const uint8_t POT_PINS[6] = {
-    1, 2, 4, 5, 6, 7
+    1, 2, 4, 5, 6, //7
 };
 
 // Mechanical keyboard switch
@@ -704,66 +704,66 @@ void setup() {
 // ============================================================
 // 20. MAIN LOOP
 // ============================================================
-//testtest
+
 void loop() {
-    delay(10);
-    // uint32_t currentTime = millis();
+
+    uint32_t currentTime = millis();
 
 
-    // if (
-    //     currentTime - lastSampleTime
-    //     >= SAMPLE_INTERVAL_MS
-    // ) {
+    if (
+        currentTime - lastSampleTime
+        >= SAMPLE_INTERVAL_MS
+    ) {
 
-    //     lastSampleTime = currentTime;
-
-
-    //     // ----------------------------------------------------
-    //     // SIX POTENTIOMETERS
-    //     // ----------------------------------------------------
-
-    //     for (uint8_t i = 0; i < 6; i++) {
-
-    //         processPotentiometer(pots[i]);
-
-    //     }
+        lastSampleTime = currentTime;
 
 
-    //     // ----------------------------------------------------
-    //     // MECHANICAL KEYBOARD SWITCH
-    //     // ----------------------------------------------------
+        // ----------------------------------------------------
+        // SIX POTENTIOMETERS
+        // ----------------------------------------------------
 
-    //     processButton(mechanicalSwitch);
+        for (uint8_t i = 0; i < 6; i++) {
 
+            processPotentiometer(pots[i]);
 
-    //     // ----------------------------------------------------
-    //     // OPTIONAL JOYSTICK
-    //     // ----------------------------------------------------
-
-    //     #if ENABLE_JOYSTICK
-
-    //     processJoystickAxis(
-    //         joystickX,
-    //         joystickCenterX
-    //     );
+        }
 
 
-    //     processJoystickAxis(
-    //         joystickY,
-    //         joystickCenterY
-    //     );
+        // ----------------------------------------------------
+        // MECHANICAL KEYBOARD SWITCH
+        // ----------------------------------------------------
+
+        processButton(mechanicalSwitch);
 
 
-    //     // Optional joystick pushbutton
+        // ----------------------------------------------------
+        // OPTIONAL JOYSTICK
+        // ----------------------------------------------------
 
-    //     #if ENABLE_JOYSTICK_BUTTON
+        #if ENABLE_JOYSTICK
 
-    //     processButton(joystickButton);
+        processJoystickAxis(
+            joystickX,
+            joystickCenterX
+        );
 
-    //     #endif
 
-    //     #endif
+        processJoystickAxis(
+            joystickY,
+            joystickCenterY
+        );
 
-    // }
+
+        // Optional joystick pushbutton
+
+        #if ENABLE_JOYSTICK_BUTTON
+
+        processButton(joystickButton);
+
+        #endif
+
+        #endif
+
+    }
 
 }
